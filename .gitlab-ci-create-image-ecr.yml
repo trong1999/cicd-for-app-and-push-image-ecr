@@ -1,0 +1,33 @@
+# Simple example of CI to build a Docker container and push it to Amazon ECR
+variables:
+  GTV_ECR_REPOSITORY_URL: 199867557169.dkr.ecr.ap-southeast-1.amazonaws.com
+  AWS_REGION: ap-southeast-1
+  APP_NAME_BACKEND_ECR: backend-golang
+  APP_NAME_FRONTEND_ECR: frontend-node
+  DOCKER_HOST: tcp://docker:2375
+  DOCKER_DRIVER: overlay2
+  DOCKER_TLS_CERTDIR: ""
+  DOCKER_IMAGE_BACKEND_VERSION: 1-17
+  DOCKER_IMAGE_FRONTEND_VERSION: 14-0
+
+publish:
+  stage: build
+  tags:
+    - gplay-deploy-runner-prod
+  image: 
+    name: docker:latest
+  services:
+    - docker:19-dind
+  before_script:
+    - apk add --no-cache curl jq python2 py-pip
+    - pip install awscli
+    - aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin $GTV_ECR_REPOSITORY_URL
+    - aws --version
+    - docker info
+    - docker --version
+  script:
+    - docker build -t $GTV_ECR_REPOSITORY_URL/$APP_NAME_FRONTEND_ECR:$DOCKER_IMAGE_FRONTEND_VERSION .
+    - docker push $GTV_ECR_REPOSITORY_URL/$APP_NAME_FRONTEND_ECR:$DOCKER_IMAGE_FRONTEND_VERSION
+  when: manual
+  
+

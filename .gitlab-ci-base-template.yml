@@ -1,0 +1,157 @@
+image: docker:latest
+
+stages:
+  - build
+  - deploy
+
+variables:
+  PROJECT: gplay
+  DOCKER_HOST: tcp://docker:2375/
+  DOCKER_DRIVER: overlay2
+  DOCKER_TLS_CERTDIR: ""
+  GTV_ECR_REPOSITORY_URL: 199867557169.dkr.ecr.ap-southeast-1.amazonaws.com
+
+services:
+  - name: docker:dind
+    entrypoint: ["env", "-u", "DOCKER_HOST"]
+    command: ["dockerd-entrypoint.sh"]
+
+build:
+  stage: build
+  tags:
+    - gplay-deploy-runner-prod
+  allow_failure: false
+  script:
+    - apk add --no-cache curl jq python2 py-pip
+    - pip install awscli
+    - aws ecr get-login-password --region ap-southeast-1 | docker login --username AWS --password-stdin $GTV_ECR_REPOSITORY_URL
+    - echo "Building image."
+    - IMAGE_TAG=$GTV_ECR_REPOSITORY_URL/$PROJECT/dev/$APP_NAME_ECR:dev
+    - docker pull $IMAGE_TAG || echo "Building runtime from scratch"
+    - >
+      docker build
+      --cache-from $IMAGE_TAG
+      -t $IMAGE_TAG .
+    - docker push $IMAGE_TAG
+  only:
+    - develop
+    - /^dev-.*$/
+  when: manual
+#  trigger_permissions:
+#    roles:
+#      - developer
+#      - maintainer
+
+build_staging:
+  stage: build
+  tags:
+    - gplay-deploy-runner-prod
+  allow_failure: false
+  environment:
+    name: staging
+  script:
+    - apk add --no-cache curl jq python2 py-pip
+    - pip install awscli
+    - aws ecr get-login-password --region ap-southeast-1 | docker login --username AWS --password-stdin $GTV_ECR_REPOSITORY_URL
+    - echo "Building image:"
+    - IMAGE_TAG=$GTV_ECR_REPOSITORY_URL/$PROJECT/stag/$APP_NAME_ECR:staging
+    - docker pull $IMAGE_TAG || echo "Building runtime from scratch"
+    - >
+      docker build
+      --cache-from $IMAGE_TAG
+      -t $IMAGE_TAG .
+    - docker push $IMAGE_TAG
+  only:
+    - staging
+    - /^staging-/
+  when: manual
+
+build_prod:
+  stage: build
+  tags:
+    - gplay-deploy-runner-prod
+  allow_failure: false
+  environment:
+    name: production
+  script:
+    - apk add --no-cache curl jq python2 py-pip
+    - pip install awscli
+    - aws ecr get-login-password --region ap-southeast-1 | docker login --username AWS --password-stdin $GTV_ECR_REPOSITORY_URL
+    - echo "Building image..."
+    - VERSION=version-$(date +%d-%b-%Y)-$CI_COMMIT_SHORT_SHA
+    - IMAGE_TAG=$GTV_ECR_REPOSITORY_URL/$PROJECT/prod/$APP_NAME_ECR:$VERSION
+    - echo $IMAGE_TAG
+    - docker pull $IMAGE_TAG || echo "Building runtime from scratch"
+    - >
+      docker build
+      --cache-from $IMAGE_TAG
+      -t $IMAGE_TAG .
+    - docker push $IMAGE_TAG
+  only:
+    - release
+  when: manual
+
+.deploy_template:
+  stage: deploy
+  tags:
+  - gplay-deploy-runner-prod
+  image: pstauffer/curl
+  script:
+    - echo $GITLAB_USER_NAME
+    - echo $CI_COMMIT_MESSAGE
+    - |
+        if [ "$ENV" = "prod" ]; then
+            APP_IMAGE_TAG=version-$(date +%d-%b-%Y)-$CI_COMMIT_SHORT_SHA
+        fi
+    - echo $APP_IMAGE_TAG
+    - >
+      curl -G --compressed -sS
+      --data-urlencode "user=${GITLAB_USER_NAME}"
+      --data-urlencode "commit_message=${CI_COMMIT_MESSAGE}"
+      -H 'Connection: keep-alive'
+      "${WEBHOOKD_URL}?application=${APP_NAME}&branch=${DEPLOY_BRANCH}&commit=${CI_COMMIT_SHA}&env=$ENV&app_branch=$APP_IMAGE_TAG"
+      &> /dev/stdout | tee -a /tmp/status
+    - grep -q "Patching done!" /tmp/status; [ $? -eq 0 ] && exit 0 || exit 1
+
+deploy_dev:
+  extends: .deploy_template
+  tags:
+    - gplay-deploy-runner-prod
+  environment:
+    name: development
+  variables:
+    DEPLOY_BRANCH: single_deployment
+    APP_IMAGE_TAG: dev
+    WEBHOOKD_URL: http://gplay-webhook-service:8080/deploy
+    ENV: dev
+  only:
+    - develop
+    - main
+    - /^dev-.*$/
+
+deploy_staging:
+  extends: .deploy_template
+  environment:
+    name: staging
+  variables:
+    DEPLOY_BRANCH: single_deployment
+    APP_IMAGE_TAG: staging
+    WEBHOOKD_URL: http://gplay-webhook-service:8080/deploy
+    VERSION: v1.0
+    ENV: stag
+  only:
+    - staging
+    - /^staging-.*$/
+
+deploy_production:
+  extends: .deploy_template
+  environment:
+    name: production
+  variables:
+    DEPLOY_BRANCH: single_deployment
+    APP_IMAGE_TAG: prod
+    WEBHOOKD_URL: http://gplay-webhook-service:8080/deploy
+    VERSION: v1.0
+    ENV: prod
+  only:
+    - release
